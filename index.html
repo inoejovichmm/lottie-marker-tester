@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lottie Marker Tester</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; background: #14161a; color: #e8eaed; }
+  main { max-width: 900px; margin: 0 auto; padding: 24px; display: grid; gap: 16px; }
+  h1 { margin: 0; font-size: 20px; }
+  .stage { background: #fff; border-radius: 8px; height: 60vh; display: flex; align-items: center; justify-content: center; overflow: hidden;
+    background-image: linear-gradient(45deg,#eee 25%,transparent 25%,transparent 75%,#eee 75%),linear-gradient(45deg,#eee 25%,transparent 25%,transparent 75%,#eee 75%);
+    background-size: 20px 20px; background-position: 0 0, 10px 10px; background-color: #fff; }
+  canvas { flex: none; }
+  canvas[hidden] { display: none; }
+  .empty { color: #666; }
+  .controls { display: flex; align-items: center; gap: 12px; }
+  button { cursor: pointer; border: 0; border-radius: 6px; background: #3b82f6; color: #fff; padding: 8px 14px; font-size: 14px; }
+  button:disabled { opacity: .4; cursor: default; }
+  #playBtn { width: 44px; height: 40px; padding: 0; font-size: 16px; }
+  .bar { position: relative; flex: 1; height: 28px; }
+  .bar input { position: absolute; inset: 0; width: 100%; margin: 0; height: 28px; background: transparent; cursor: pointer; }
+  .track { position: absolute; left: 0; right: 0; top: 12px; height: 4px; background: #3a3f47; border-radius: 2px; pointer-events: none; }
+  .tick { position: absolute; top: 4px; width: 3px; height: 20px; margin-left: -1px; background: #fbbf24; border-radius: 1px; pointer-events: none; }
+  .range { position: absolute; top: 12px; height: 4px; background: rgba(251,191,36,.6); pointer-events: none; }
+  .time { font-variant-numeric: tabular-nums; font-size: 13px; color: #9aa0a6; min-width: 110px; text-align: right; }
+  ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  li button { width: 100%; text-align: left; background: #20242b; display: flex; justify-content: space-between; }
+  li button.active { background: #b45309; }
+  li small { color: #9aa0a6; }
+  .hint { color: #9aa0a6; font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Lottie Marker Tester</h1>
+  <input type="file" id="file" accept=".json,application/json">
+
+  <div class="stage">
+    <canvas id="canvas" hidden></canvas>
+    <span class="empty" id="empty">Select a Lottie .json file</span>
+  </div>
+
+  <div class="controls">
+    <button id="playBtn" disabled title="Play / Pause">⏸</button>
+    <div class="bar">
+      <div class="track"></div>
+      <div class="range" id="range" hidden></div>
+      <div id="ticks"></div>
+      <input type="range" id="seek" min="0" max="1" step="any" value="0" disabled>
+    </div>
+    <div class="time" id="time">0 / 0</div>
+  </div>
+
+  <section>
+    <h2 style="font-size:16px">Markers</h2>
+    <div id="markers" class="hint">Load a file to see its markers.</div>
+  </section>
+</main>
+
+<script type="module">
+import { DotLottie } from "https://cdn.jsdelivr.net/npm/@lottiefiles/dotlottie-web/+esm";
+
+const $ = (id) => document.getElementById(id);
+const canvas = $("canvas"), playBtn = $("playBtn"), seek = $("seek"), timeEl = $("time");
+const ticksEl = $("ticks"), rangeEl = $("range"), markersEl = $("markers");
+
+let player = null, total = 0, markers = [], active = null, playing = false, dragging = false;
+
+// Scale the canvas's CSS size to fit the stage while keeping the animation's aspect ratio
+function fitCanvas() {
+  const stage = canvas.parentElement;
+  const scale = Math.min(stage.clientWidth / canvas.width, stage.clientHeight / canvas.height);
+  canvas.style.width = `${canvas.width * scale}px`;
+  canvas.style.height = `${canvas.height * scale}px`;
+}
+window.addEventListener("resize", fitCanvas);
+
+function setPlaying(p) { playing = p; playBtn.textContent = p ? "⏸" : "▶"; }
+
+function updateTime(frame) {
+  if (!dragging) seek.value = frame;
+  timeEl.textContent = `${Math.round(frame)} / ${Math.round(total)}`;
+}
+
+function renderMarkers() {
+  ticksEl.innerHTML = "";
+  markersEl.innerHTML = "";
+  markersEl.className = "";
+  if (!markers.length) {
+    markersEl.className = "hint";
+    markersEl.textContent = "This Lottie has no markers.";
+    return;
+  }
+  const ul = document.createElement("ul");
+  markers.forEach((m, i) => {
+    const tick = document.createElement("div");
+    tick.className = "tick";
+    tick.style.left = `${(m.start / total) * 100}%`;
+    tick.title = m.name;
+    ticksEl.appendChild(tick);
+
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.innerHTML = `<span></span><small>frames ${m.start}–${m.end}</small>`;
+    b.firstChild.textContent = m.name;
+    b.onclick = () => selectMarker(active === i ? null : i);
+    li.appendChild(b);
+    ul.appendChild(li);
+  });
+  markersEl.appendChild(ul);
+}
+
+function selectMarker(i) {
+  active = i;
+  [...markersEl.querySelectorAll("li button")].forEach((b, idx) => b.classList.toggle("active", idx === i));
+  if (i === null) {
+    rangeEl.hidden = true;
+    player.setSegment(0, total);
+  } else {
+    const m = markers[i];
+    rangeEl.hidden = false;
+    rangeEl.style.left = `${(m.start / total) * 100}%`;
+    rangeEl.style.width = `${((m.end - m.start) / total) * 100}%`;
+    player.setSegment(m.start, m.end);
+  }
+  player.setLoop(true);
+  player.setFrame(i === null ? 0 : markers[i].start);
+  player.play();
+}
+
+function parseMarkers(json) {
+  return (json.markers || []).map((m) => {
+    const start = Number(m.tm) || 0;
+    const dur = Number(m.dr) || 0;
+    return { name: m.cm || "(unnamed)", start, end: dur > 0 ? Math.min(start + dur, total) : total };
+  });
+}
+
+$("file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  let json;
+  try { json = JSON.parse(await file.text()); }
+  catch { markersEl.className = "hint"; markersEl.textContent = "Not a valid JSON file."; return; }
+
+  if (player) { player.destroy(); player = null; }
+  active = null;
+  $("empty").hidden = true;
+  canvas.hidden = false;
+  canvas.width = json.w || 512;
+  canvas.height = json.h || 512;
+  fitCanvas();
+  total = (json.op ?? 0) - (json.ip ?? 0);
+
+  player = new DotLottie({ canvas, data: json, autoplay: true, loop: true, renderConfig: { autoResize: false } });
+  player.addEventListener("load", () => {
+    total = player.totalFrames || total;
+    seek.max = total;
+    seek.disabled = playBtn.disabled = false;
+    markers = parseMarkers(json);
+    renderMarkers();
+    rangeEl.hidden = true;
+    setPlaying(true);
+  });
+  player.addEventListener("frame", (ev) => updateTime(ev.currentFrame));
+  player.addEventListener("play", () => setPlaying(true));
+  player.addEventListener("pause", () => setPlaying(false));
+});
+
+playBtn.onclick = () => (playing ? player.pause() : player.play());
+
+seek.addEventListener("pointerdown", () => { dragging = true; if (playing) player.pause(); });
+seek.addEventListener("input", () => {
+  const f = Number(seek.value);
+  player.setFrame(f);
+  timeEl.textContent = `${Math.round(f)} / ${Math.round(total)}`;
+});
+window.addEventListener("pointerup", () => { dragging = false; });
+</script>
+</body>
+</html>
